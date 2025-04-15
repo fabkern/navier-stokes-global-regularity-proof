@@ -65,7 +65,7 @@ Failures are archived in `/content/output/counterexamples/`, including `.npy`, `
 
 All 100-timestep proofs (with certificate logs and Lean outputs) were run in:
 
-🔗 **[Colab Proof Notebook (A100 GPU)](https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID_HERE)**  
+🔗 **[Colab Proof Notebook (A100 GPU)](https://colab.research.google.com/drive/1C103Esampqlt4tIdraiEYgO3yrtPZ9KD?usp=sharing)**  
 Replace with your actual Colab link after uploading.
 
 ---
