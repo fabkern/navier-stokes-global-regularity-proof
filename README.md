@@ -55,7 +55,6 @@ Failures are archived in `/content/output/counterexamples/`, including `.npy`, `
 | `generate_random_fields.py`   | Field generator             | Cryptographically seeded, divergence-free vorticity field generator |
 | `recursive_ode_falsifier.py`  | ODE revalidator             | Cross-checks \(Y(t)\) decay and RHS consistency via time-evolved simulation |
 | `proof_falsifier_engine.py`   | Adversarial injector        | Runs randomized and edge-case tests against proof logic |
-| `proof_summary_dashboard.py`  | Dashboard + Audit Summary   | Compiles entropy, pass/fail, certificate stats, visualizations |
 | `certificate_packager.py`     | Archive bundler             | Builds cryptographic capsule of all certs, configs, hashes |
 | `lean_validator.py`           | Lean cert checker           | Validates `.lean` theorems, checks AST duplication or failure |
 | (Colab link below)            | GPU Proof Execution         | Full 100-step GPU proof logs and Lean certs live in Google Colab |
@@ -86,13 +85,10 @@ python3 recursive_ode_falsifier.py --strict --lean_cert
 # Step 4: Fuzz with randomized and adversarial fields
 python3 proof_falsifier_engine.py
 
-# Step 5: Summarize and visualize results
-python3 proof_summary_dashboard.py --export --plot
-
-# Step 6: Package archive bundle
+# Step 5: Package archive bundle
 python3 certificate_packager.py
 
-# Step 7: Validate Lean certificates
+# Step 6: Validate Lean certificates
 python3 lean_validator.py --dir /content/output/counterexamples/ --strict --check_duplicate_ast
 ```
 
