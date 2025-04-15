@@ -136,6 +136,6 @@ python3 lean_validator.py --dir /content/output/counterexamples/ --strict --chec
 ## Authorship & License
 
 - Maintainer: [Fabian Kern - fabkern@proton.me]
-- License: MIT (with mathematical provenance clause)
+- License: MIT. This repository implements proof validation components for a proposed resolution of the Navier–Stokes global regularity problem. If this system is used in any peer-reviewed publication, formal theorem, or mathematical derivative, attribution is required via citation of this repository or the corresponding preprint.
 - Status: Under audit. No formal peer-reviewed verification yet. Submissions and third-party reproducibility reports welcome.
 
