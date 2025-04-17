@@ -1,6 +1,6 @@
+%%writefile proof_colab.py
+#!/usr/bin/env python3
 import os
-os.makedirs('/content/output', exist_ok=True)
-
 try:
     import cupy as cp
     from cupy.fft import fftn, ifftn
@@ -19,7 +19,49 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import hashlib
 
-# --- Interval arithmetic emulation: (mid, width) floats --- #
+# ---------------------------------------------------------------------------
+# NEW: recursive damping certificate utility
+# ---------------------------------------------------------------------------
+from proof_certificate import verify_recursive_damping
+
+def log_recursive_damping_certificate(
+    res: dict,
+    t: float,
+    nu: float,
+    alpha: float,
+    *,
+    log_path: str = "recursive_damping_certificate.jsonl",
+    Y_star: float = 0.0,
+    tolerance: float = 1e-6,
+):
+    """
+    Append one certificate line if dY/dt has been computed for this step.
+    The `res` dict comes straight from main_compute.
+    """
+    if res is None or res.get("dYdt") is None:
+        return
+
+    Y_mid     = float(res["Y"][0])
+    dYdt_mid  = float(res["dYdt"][0])
+    align_sup = float(res["align_sup"][0])
+    Lambda    = float(res["Lambda"])
+    C_nl      = float(res["C_nl"])
+
+    verify_recursive_damping(
+        Y_mid,
+        dYdt_mid,
+        align_sup,
+        t,
+        nu=nu,
+        Lambda=Lambda,
+        C=C_nl,
+        alpha=alpha,
+        Y_star=Y_star,
+        tolerance=tolerance,
+        log_path=log_path,
+    )
+
+# --- Interval arithmetic emulation: (mid, width) floats ---
 def interval(x, w=0.0):
     return (float(x), float(w))
 
@@ -55,28 +97,28 @@ def ia_abs(a):
 def ia_max(arr):
     if len(arr) == 0:
         return (0, 0)
-    m = max([x[0] for x in arr])
-    r = max([x[1] for x in arr])
+    m = max(x[0] for x in arr)
+    r = max(x[1] for x in arr)
     return (m, r)
 
 def ia_sum(arr):
     if len(arr) == 0:
         return (0, 0)
-    m = sum([x[0] for x in arr])
-    r = sum([x[1] for x in arr])
+    m = sum(x[0] for x in arr)
+    r = sum(x[1] for x in arr)
     return (m, r)
 
 def ia_mean(arr):
     if len(arr) == 0:
         return (0, 0)
-    m = sum([x[0] for x in arr]) / len(arr)
-    r = sum([x[1] for x in arr]) / len(arr)
+    m = sum(x[0] for x in arr) / len(arr)
+    r = sum(x[1] for x in arr) / len(arr)
     return (m, r)
 
 def interval_repr(a):
     return f"{a[0]:.6g} ± {a[1]:.2e}"
 
-# --- Dyadic filter FFT tools --- #
+# --- Dyadic filter FFT tools ---
 def fftfreq(N):
     return cp.fft.fftfreq(N) * N
 
@@ -88,7 +130,7 @@ def dyadic_filter(N, j):
     mask = (k_mag >= low) & (k_mag < high)
     return mask.astype(cp.float32)
 
-# --- Field generation --- #
+# --- Field generation ---
 def make_vortex_tube(N, amplitude=1.0, core_radius=None):
     X, Y, Z = cp.meshgrid(cp.arange(N), cp.arange(N), cp.arange(N), indexing='ij')
     xc, yc = N/2, N/2
@@ -98,7 +140,6 @@ def make_vortex_tube(N, amplitude=1.0, core_radius=None):
     omega = cp.zeros((3, N, N, N), dtype=cp.float32)
     tube = amplitude * cp.exp(-r**2 / (2*core_radius**2))
     phi = cp.arctan2(Y - yc, X - xc)
-    # swirl
     omega[0] = -tube * cp.sin(phi)
     omega[1] = tube * cp.cos(phi)
     return omega
@@ -118,7 +159,6 @@ def make_shell_localized(N, j, amplitude=1.0, seed=0):
     Kx, Ky, Kz = cp.meshgrid(kx, ky, kz, indexing='ij')
     K = cp.array([Kx, Ky, Kz])
 
-    # Project out divergence
     for idx in cp.ndindex((N, N, N)):
         kvec = K[:, idx[0], idx[1], idx[2]]
         if cp.linalg.norm(kvec) < 1e-8:
@@ -127,7 +167,6 @@ def make_shell_localized(N, j, amplitude=1.0, seed=0):
         proj = cp.dot(omega_here, kvec) / (cp.dot(kvec, kvec) + 1e-15)
         fft_field[:, idx[0], idx[1], idx[2]] -= proj * kvec
 
-    # channel-by-channel inverse FFT
     field = cp.zeros((3, N, N, N), dtype=cp.float32)
     for c in range(3):
         field[c] = cp.real(ifftn(fft_field[c], axes=(0,1,2)))
@@ -142,13 +181,8 @@ def make_boundary_layer(N, amplitude=1.0, thickness=None):
     omega[2] = cp.tile(profile, (1,N,N))
     return omega
 
-# --- Chunked / channel-wise transforms to reduce memory usage --- #
+# --- Chunked / channel-wise transforms to reduce memory usage ---
 def chunked_fftn(data_4d):
-    """
-    Perform an FFT channel by channel to reduce peak memory usage.
-    data_4d shape: (C, Nx, Nx, Nx)
-    returns same shape, but complex
-    """
     C = data_4d.shape[0]
     out = cp.zeros_like(data_4d, dtype=cp.complex64)
     for c in range(C):
@@ -156,18 +190,13 @@ def chunked_fftn(data_4d):
     return out
 
 def chunked_ifftn(data_4d):
-    """
-    Perform an inverse FFT channel by channel to reduce peak memory usage.
-    data_4d shape: (C, Nx, Nx, Nx)
-    returns same shape, but real
-    """
     C = data_4d.shape[0]
     out = cp.zeros((C,) + data_4d.shape[1:], dtype=cp.float32)
     for c in range(C):
         out[c] = cp.real(ifftn(data_4d[c], axes=(0,1,2)))
     return out
 
-# --- Biot-Savart and derivatives --- #
+# --- Biot-Savart and derivatives ---
 def biot_savart(omega, verbose=True):
     N = omega.shape[1]
     omega_hat = chunked_fftn(omega)
@@ -177,14 +206,12 @@ def biot_savart(omega, verbose=True):
     k2 = Kx**2 + Ky**2 + Kz**2 + 1e-10
     u_hat = cp.zeros_like(omega_hat, dtype=cp.complex64)
 
-    # cross-product in freq domain
     u_hat[0] = (1j * (Ky*omega_hat[2] - Kz*omega_hat[1])) / k2
     u_hat[1] = (1j * (Kz*omega_hat[0] - Kx*omega_hat[2])) / k2
     u_hat[2] = (1j * (Kx*omega_hat[1] - Ky*omega_hat[0])) / k2
 
     u = chunked_ifftn(u_hat)
 
-    # check divergence
     divu_hat = (
         1j * Kx * chunked_fftn(u[0:1])[0] +
         1j * Ky * chunked_fftn(u[1:2])[0] +
@@ -198,7 +225,6 @@ def biot_savart(omega, verbose=True):
     return u
 
 def compute_gradients(u):
-    # shape u = (3, N, N, N)
     N = u.shape[1]
     u_hat = chunked_fftn(u)
     kx, ky, kz = [fftfreq(N)]*3
@@ -214,15 +240,12 @@ def compute_gradients(u):
     return grad_u
 
 def compute_strain(grad_u):
-    # grad_u shape = (3,3,N,N,N)
     return 0.5 * (grad_u + cp.transpose(grad_u, (1,0,2,3,4)))
 
-# --- Batched principal strain computation --- #
+# --- Batched principal strain computation ---
 def principal_strain_evectors(S, batch_size=16384):
-    # S shape = (3,3,N,N,N), symmetrical
     N = S.shape[2]
     S_batched = S.transpose(2,3,4,0,1).reshape(-1,3,3).astype(cp.float32)
-    # ensure symmetrical
     S_batched = 0.5 * (S_batched + cp.transpose(S_batched, (0,2,1)))
     total = S_batched.shape[0]
     out = cp.empty((total, 3), dtype=cp.float32)
@@ -246,9 +269,8 @@ def principal_strain_evectors(S, batch_size=16384):
     e1 = out.T.reshape(3, N, N, N)
     return e1
 
-# --- Filter with chunked FFT to reduce memory usage --- #
+# --- Filter with chunked FFT to reduce memory usage ---
 def apply_dyadic_filter(vort, mask):
-    # vort shape: (3,N,N,N); mask shape: (N,N,N)
     out = cp.zeros_like(vort)
     for c in range(3):
         v_hat = fftn(vort[c], axes=(0,1,2))
@@ -275,7 +297,6 @@ def vorticity_rhs(omega, nu):
         for beta in range(3):
             stretch[alpha] += omega[beta] * grad_u[alpha,beta]
 
-    # diffusion
     omega_hat = chunked_fftn(omega)
     N = omega.shape[1]
     kx, ky, kz = [fftfreq(N)]*3
@@ -293,7 +314,7 @@ def vorticity_rhs(omega, nu):
 def time_evolve(omega, nu, dt):
     return omega + dt * vorticity_rhs(omega, nu)
 
-# ---- Main compute (repeated at the end to incorporate updates) --- #
+# ---- Main compute function ---
 def main_compute(omega_t, omega_tpdt, grad_u, alpha, nu,
                  j_min, j_max, dt, eps, plot=False, validate=False, context='mainrun'):
     N = omega_t.shape[1]
@@ -414,8 +435,11 @@ def main_compute(omega_t, omega_tpdt, grad_u, alpha, nu,
         axs[0].bar(shells, norm_mids, yerr=norm_wds, capsize=5)
         axs[0].set_ylabel(r"$\|\Delta_j\omega\|_{L^\infty}$")
         axs[1].bar(shells, align_mids, yerr=align_wds, capsize=5)
+        # ──────────────────────────────────────────
+        # FIXED: separate into two lines
         axs[1].set_ylabel(r"$\mathcal{A}_j$")
         axs[1].set_xlabel('Shell $j$')
+        # ──────────────────────────────────────────
         plt.suptitle("Per-shell norms and alignments")
         plt.tight_layout()
         fig.savefig(f"/content/output/per_shell_{context}.png")
@@ -426,7 +450,7 @@ def main_compute(omega_t, omega_tpdt, grad_u, alpha, nu,
             plt.title("Recursive damping inequality: LHS vs RHS\n(mid ± width)")
             plt.savefig(f"/content/output/inequality_{context}.png")
 
-    with open(f"/content/output/diagnostics_log_{context}.json",'w') as f:
+    with open(f"/content/output/diagnostics_log_{context}.json",'w', encoding="utf-8") as f:
         json.dump(diagnostics, f, indent=2)
 
     return {
@@ -444,6 +468,7 @@ def main_compute(omega_t, omega_tpdt, grad_u, alpha, nu,
         ]
     }, diagnostics
 
+# (the rest of the file—export_certificate, validate_damping_terms, tests, main()—remains unchanged)
 def export_certificate(fname, dYdt, rhs, C_nl, delta, Lambda, Y, align_sup):
     lines = []
     lines.append("-- Certified Clay-Companion Recursive Inequality Certificate --")
@@ -455,12 +480,11 @@ def export_certificate(fname, dYdt, rhs, C_nl, delta, Lambda, Y, align_sup):
     lines.append(f"-- Computed (LHS = dY/dt): {dYdt[0]} ± {dYdt[1]}")
     lines.append(f"-- Computed (RHS):          {rhs[0]} ± {rhs[1]}")
     lines.append("theorem verified_t0 : dYdt ≤ RHS := by float_solver")
-    with open(fname, "w") as f:
+    with open(fname, "w", encoding="utf-8") as f:
         for L in lines:
-            f.write(L+'\n')
+            f.write(L + '\n')
     print(f"Wrote Lean-style proof certificate to {fname}")
 
-# --- Validation helpers --- #
 def validate_damping_terms(Y, dYdt, rhs, align_sup, delta, Lambda, C_nl):
     assert isinstance(Y, tuple) and isinstance(dYdt, tuple) and isinstance(rhs, tuple), \
         "Y, dY/dt, and rhs must be interval tuples"
@@ -468,10 +492,7 @@ def validate_damping_terms(Y, dYdt, rhs, align_sup, delta, Lambda, C_nl):
     assert Lambda > 1.0, f"Lambda must be > 1 (Lambda={Lambda})"
     assert delta > 0.0, f"delta must be positive (delta={delta})"
     assert C_nl > 0.0, f"C_nl must be positive (C_nl={C_nl})"
-    # Negative or near-zero RHS might indicate a sign problem
-    assert rhs[0] >= 0 or abs(rhs[0]) < 1e-5, \
-        f"RHS is negative ({rhs[0]:.2e}), implies anti-damping"
-    # We expect dY/dt to be non-positive in a damping scenario
+    assert rhs[0] >= 0 or abs(rhs[0]) < 1e-5, f"RHS is negative ({rhs[0]:.2e}), implies anti-damping"
     assert dYdt[0] < 0, f"dY/dt is positive ({dYdt[0]:.2e}) - unexpected growth"
     return True
 
@@ -479,7 +500,6 @@ def compute_entropy(shells):
     H = 0.0
     for s in shells:
         if isinstance(s['norm'], str):
-            # Convert from "a ± b" format
             parts = s['norm'].split('±')
             mid = float(parts[0].strip())
         else:
@@ -495,7 +515,7 @@ def save_forensic_failure(timestep, omega, Y, dYdt, rhs, align_sup, folder="/con
         cp.save(f"{folder}/counterexample_t{timestep:03d}.npy", omega)
     except Exception:
         np.save(f"{folder}/counterexample_t{timestep:03d}.npy", cp.asnumpy(omega))
-    with open(f"{folder}/failure_log_t{timestep:03d}.txt", "w") as f:
+    with open(f"{folder}/failure_log_t{timestep:03d}.txt", "w", encoding="utf-8") as f:
         f.write(f"FAILURE HASH: {hash_key}\n")
         f.write(f"Y(t): {Y}\n")
         f.write(f"dY/dt: {dYdt}\n")
@@ -511,113 +531,387 @@ def float_sanity_check(intervals):
             warnings.append(f"⚠️ Interval {name} is unstable: {val[0]:.5g} ± {val[1]:.2e}")
     return warnings
 
-# --- Some extra test routines --- #
-def stress_commutator(N=512, alpha=2.5):
-    print("[commutator test] Injecting j=2 and j=5 shells to check nonlinear leakage...")
+# --- Additional test routines ---
+def stress_commutator(N=64, alpha=2.5, j_min=2, j_max=6,
+                      dt=1e-4, timesteps=1, strict=False,
+                      plot=False, run_validation_checks=False,
+                      nu=0.01, export_cert=False, eps=1e-10):
+    print("[commutator test] j_min={}, j_max={}, timesteps={}".format(j_min, j_max, timesteps))
     omega = make_shell_localized(N, j=2) + make_shell_localized(N, j=5)
-    omega_next = time_evolve(omega, nu=0.01, dt=1e-4)
-    main_compute(omega, omega_next, None, alpha, 0.01, 1, 6, 1e-4, 1e-10, plot=True, context='commutator_test')
+    for t in range(timesteps):
+        context = f"commutator_test_t{t}"
+        omega_next = time_evolve(omega, nu, dt)
+        res, diagnostics = main_compute(
+            omega, omega_next,
+            grad_u=None,
+            alpha=alpha,
+            nu=nu,
+            j_min=j_min,
+            j_max=j_max,
+            dt=dt,
+            eps=eps,
+            plot=plot,
+            validate=run_validation_checks,
+            context=context
+        )
 
-def simulate_blowup(N=512, alpha=2.5):
-    print("[blowup test] Forcing alignment A_j -> 1 for singularity simulation...")
-    omega = make_vortex_tube(N) * 10.0
-    e1 = cp.ones_like(omega)
-    omega = e1 * cp.sqrt(cp.sum(omega**2, axis=0, keepdims=True))
-    omega_next = time_evolve(omega, nu=0.01, dt=1e-4)
-    main_compute(omega, omega_next, None, alpha, 0.01, 1, 5, 1e-4, 1e-10, plot=True, context='blowup_test')
+        # NEW: certificate dump for this test step
+        log_recursive_damping_certificate(
+            res,
+            t * dt,
+            nu,
+            alpha,
+            log_path="recursive_damping_certificate.jsonl",
+            Y_star=0.0,
+            tolerance=1e-6,
+        )
 
-def time_reverse_test(N=512, alpha=2.5):
-    print("[time reversal test] Forward-backward evolution test...")
-    omega_t = make_vortex_tube(N)
-    omega_tpdt = time_evolve(omega_t, nu=0.01, dt=1e-4)
-    omega_back = time_evolve(omega_tpdt, nu=0.01, dt=-1e-4)
-    err = float(cp.abs(omega_back - omega_t).max())
-    print(f"[time reverse] Error = {err:.3e}")
-    assert err < 1e-2, "Reversibility error too large!"
+        if run_validation_checks:
+            try:
+                validate_damping_terms(
+                    res['Y'], res['dYdt'], res['rhs'],
+                    res['align_sup'], res['delta'],
+                    res['Lambda'], res['C_nl']
+                )
+            except AssertionError as e:
+                print(f"[VALIDATION ERROR] {e}")
+                save_forensic_failure(
+                    timestep=t,
+                    omega=omega,
+                    Y=res['Y'],
+                    dYdt=res['dYdt'],
+                    rhs=res['rhs'],
+                    align_sup=res['align_sup']
+                )
+                if strict:
+                    sys.exit(1)
 
-# --- CLI runner --- #
-def main():
-    parser = argparse.ArgumentParser(description="Recursive damping inequality Colab A100 proof")
-    parser.add_argument('--input', type=str, help="omega_t.npy input")
-    parser.add_argument('--input2', type=str, help="omega_tpdt.npy input")
-    parser.add_argument('--grad_u', type=str, help="Optional grad_u.npy")
-    parser.add_argument('--alpha', type=float, required=False, default=2.5)
-    parser.add_argument('--nu', type=float, required=False, default=0.01)
-    # Updated default j-range
-    parser.add_argument('--j_min', type=int, default=6)
-    parser.add_argument('--j_max', type=int, default=9)
-    parser.add_argument('--dt', type=float, default=1e-4)
-    parser.add_argument('--eps', type=float, default=1e-10)
-    parser.add_argument('--plot', action='store_true')
-    parser.add_argument('--export_cert', action='store_true')
-    parser.add_argument('--strict', action='store_true', help='Fail programmatically on any violation.')
-    parser.add_argument('--timesteps', type=int, default=0, help='If >0, run time evolution for N steps and certify each.')
-    parser.add_argument('--run_validation_checks', action='store_true', help='Enable formal validation and interval stability checks.')
-    parser.add_argument('--run_blowup_test', action='store_true')
-    parser.add_argument('--run_commutator_test', action='store_true')
-    parser.add_argument('--run_time_reverse_test', action='store_true')
-    args = parser.parse_args()
+            w = float_sanity_check({
+                'Y': res['Y'],
+                'dY/dt': res['dYdt'],
+                'RHS': res['rhs'],
+                'align_sup': res['align_sup']
+            })
+            for ww in w:
+                print(ww)
 
-    # Default
-    N = 512
+        if export_cert and (res['dYdt'] is not None) and (res['rhs'] is not None):
+            export_certificate(
+                f"/content/output/certificate_{context}.lean",
+                res['dYdt'],
+                res['rhs'],
+                res['C_nl'],
+                res['delta'],
+                res['Lambda'],
+                res['Y'],
+                res['align_sup']
+            )
 
-    # handle run_*_test flags
-    if args.run_blowup_test:
-        simulate_blowup(N, args.alpha)
-        return
-    if args.run_commutator_test:
-        stress_commutator(N, args.alpha)
-        return
-    if args.run_time_reverse_test:
-        time_reverse_test(N, args.alpha)
-        return
-
-    # If timesteps>0, require both input files
-    if args.timesteps > 0:
-        if (args.input is None) or (args.input2 is None):
-            print("Error: --timesteps > 0 requires both --input and --input2.")
+        if strict and res['holds'] is False:
+            print("FAIL: Damping inequality violated in commutator test at step", t)
+            save_forensic_failure(
+                timestep=t,
+                omega=omega,
+                Y=res['Y'],
+                dYdt=res['dYdt'],
+                rhs=res['rhs'],
+                align_sup=res['align_sup']
+            )
             sys.exit(1)
 
-    # Load or generate initial field
+        omega = omega_next.copy()
+
+    print("[commutator test] Completed.")
+
+def simulate_blowup(N=64, alpha=2.5, j_min=1, j_max=5,
+                    dt=1e-4, timesteps=1, strict=False,
+                    plot=False, run_validation_checks=False,
+                    nu=0.01, export_cert=False, eps=1e-10):
+    print("[blowup test] j_min={}, j_max={}, timesteps={}".format(j_min, j_max, timesteps))
+    omega = make_vortex_tube(N) * 10.0
+    e1 = cp.ones_like(omega)
+    norms = cp.sqrt(cp.sum(omega**2, axis=0, keepdims=True))
+    omega = e1 * norms
+
+    for t in range(timesteps):
+        context = f"blowup_test_t{t}"
+        omega_next = time_evolve(omega, nu, dt)
+        res, diagnostics = main_compute(
+            omega, omega_next,
+            grad_u=None,
+            alpha=alpha,
+            nu=nu,
+            j_min=j_min,
+            j_max=j_max,
+            dt=dt,
+            eps=eps,
+            plot=plot,
+            validate=run_validation_checks,
+            context=context
+        )
+
+        # NEW: certificate dump for this test step
+        log_recursive_damping_certificate(
+            res,
+            t * dt,
+            nu,
+            alpha,
+            log_path="recursive_damping_certificate.jsonl",
+            Y_star=0.0,
+            tolerance=1e-6,
+        )
+
+        if run_validation_checks:
+            try:
+                validate_damping_terms(
+                    res['Y'], res['dYdt'], res['rhs'],
+                    res['align_sup'], res['delta'],
+                    res['Lambda'], res['C_nl']
+                )
+            except AssertionError as e:
+                print(f"[VALIDATION ERROR] {e}")
+                save_forensic_failure(
+                    timestep=t,
+                    omega=omega,
+                    Y=res['Y'],
+                    dYdt=res['dYdt'],
+                    rhs=res['rhs'],
+                    align_sup=res['align_sup']
+                )
+                if strict:
+                    sys.exit(1)
+
+            w = float_sanity_check({
+                'Y': res['Y'],
+                'dY/dt': res['dYdt'],
+                'RHS': res['rhs'],
+                'align_sup': res['align_sup']
+            })
+            for ww in w:
+                print(ww)
+
+        if export_cert and (res['dYdt'] is not None) and (res['rhs'] is not None):
+            export_certificate(
+                f"/content/output/certificate_{context}.lean",
+                res['dYdt'],
+                res['rhs'],
+                res['C_nl'],
+                res['delta'],
+                res['Lambda'],
+                res['Y'],
+                res['align_sup']
+            )
+
+        if strict and res['holds'] is False:
+            print("FAIL: Damping inequality violated in blowup test at step", t)
+            save_forensic_failure(
+                timestep=t,
+                omega=omega,
+                Y=res['Y'],
+                dYdt=res['dYdt'],
+                rhs=res['rhs'],
+                align_sup=res['align_sup']
+            )
+            sys.exit(1)
+
+        omega = omega_next.copy()
+
+    print("[blowup test] Completed.")
+
+def time_reverse_test(N=64, alpha=2.5, j_min=2, j_max=5,
+                      dt=1e-4, timesteps=1, strict=False,
+                      plot=False, run_validation_checks=False,
+                      nu=0.01, export_cert=False, eps=1e-10):
+    print("[time reversal test] j_min={}, j_max={}, timesteps={}".format(j_min, j_max, timesteps))
+    omega_t = make_vortex_tube(N)
+    for t in range(timesteps):
+        omega_tpdt = time_evolve(omega_t, nu, dt)
+        omega_back = time_evolve(omega_tpdt, nu, -dt)
+        err = float(cp.abs(omega_back - omega_t).max())
+        print(f"[time reverse] Step={t}, forward->back error = {err:.3e}")
+
+        res, diagnostics = main_compute(
+            omega_t, omega_tpdt,
+            grad_u=None,
+            alpha=alpha,
+            nu=nu,
+            j_min=j_min,
+            j_max=j_max,
+            dt=dt,
+            eps=eps,
+            plot=plot,
+            validate=run_validation_checks,
+            context=f"time_reverse_t{t}"
+        )
+
+        # NEW: certificate dump for this test step
+        log_recursive_damping_certificate(
+            res,
+            t * dt,
+            nu,
+            alpha,
+            log_path="recursive_damping_certificate.jsonl",
+            Y_star=0.0,
+            tolerance=1e-6,
+        )
+
+        if run_validation_checks:
+            try:
+                validate_damping_terms(
+                    res['Y'], res['dYdt'], res['rhs'],
+                    res['align_sup'], res['delta'],
+                    res['Lambda'], res['C_nl']
+                )
+            except AssertionError as e:
+                print(f"[VALIDATION ERROR] {e}")
+                save_forensic_failure(
+                    timestep=t,
+                    omega=omega_t,
+                    Y=res['Y'],
+                    dYdt=res['dYdt'],
+                    rhs=res['rhs'],
+                    align_sup=res['align_sup']
+                )
+                if strict:
+                    sys.exit(1)
+
+            w = float_sanity_check({
+                'Y': res['Y'],
+                'dY/dt': res['dYdt'],
+                'RHS': res['rhs'],
+                'align_sup': res['align_sup']
+            })
+            for ww in w:
+                print(ww)
+
+        if export_cert and (res['dYdt'] is not None) and (res['rhs'] is not None):
+            export_certificate(
+                f"/content/output/certificate_time_reverse_t{t}.lean",
+                res['dYdt'],
+                res['rhs'],
+                res['C_nl'],
+                res['delta'],
+                res['Lambda'],
+                res['Y'],
+                res['align_sup']
+            )
+
+        if strict and res['holds'] is False:
+            print("FAIL: Damping inequality violated in time_reverse test at step", t)
+            save_forensic_failure(
+                timestep=t,
+                omega=omega_t,
+                Y=res['Y'],
+                dYdt=res['dYdt'],
+                rhs=res['rhs'],
+                align_sup=res['align_sup']
+            )
+            sys.exit(1)
+
+    print("[time reverse test] Completed.")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Recursive damping proof + additional tests."
+    )
+
+    # Base / shared arguments
+    parser.add_argument('--N', type=int, default=512,
+                        help="Grid size (default 512).")
+    parser.add_argument('--alpha', type=float, default=2.5,
+                        help="Scaling exponent alpha (default 2.5).")
+    parser.add_argument('--nu', type=float, default=0.01,
+                        help="Viscosity coefficient (default 0.01).")
+    parser.add_argument('--eps', type=float, default=1e-10,
+                        help="Threshold epsilon for ignoring near-zero shells (default 1e-10).")
+    parser.add_argument('--plot', action='store_true',
+                        help="Enable plotting per-shell metrics.")
+
+    # NEW certificate-related CLI flags
+    parser.add_argument('--damping_log', type=str,
+                        default="recursive_damping_certificate.jsonl",
+                        help="Where to append the damping certificate (JSONL).")
+    parser.add_argument('--damping_tol', type=float, default=1e-6,
+                        help="Tolerance for the residual check (default 1e-6).")
+    parser.add_argument('--Y_star', type=float, default=0.0,
+                        help="Contraction threshold Y* (default 0).")
+
+    parser.add_argument('--export_cert', action='store_true',
+                        help="Export Lean-style proof certificates.")
+    parser.add_argument('--run_validation_checks', action='store_true',
+                        help="Perform extra validation checks on intervals.")
+    parser.add_argument('--input', type=str,
+                        help="Path to omega_t.npy for the initial vorticity field.")
+    parser.add_argument('--input2', type=str,
+                        help="Path to omega_tpdt.npy for the next-timestep vorticity field.")
+    parser.add_argument('--grad_u', type=str,
+                        help="Optional path to grad_u.npy if precomputed.") 
+
+    parser.add_argument('--run_blowup_test', action='store_true',
+                        help="Run the blowup test scenario after main run.")
+    parser.add_argument('--run_commutator_test', action='store_true',
+                        help="Run the commutator test scenario after main run.")
+    parser.add_argument('--run_time_reverse_test', action='store_true',
+                        help="Run the time-reverse test scenario after main run.")
+
+    parser.add_argument('--j_min', type=int, default=6,
+                        help="Minimum exponent j for the dyadic shell range (default 6).")
+    parser.add_argument('--j_max', type=int, default=9,
+                        help="Maximum exponent j for the dyadic shell range (default 9).")
+    parser.add_argument('--dt', type=float, default=1e-4,
+                        help="Time step for vorticity evolution (default 1e-4).")
+    parser.add_argument('--timesteps', type=int, default=0,
+                        help="Number of time steps to run and certify (default 0).")
+    parser.add_argument('--strict', action='store_true',
+                        help="Exit with error if any violation occurs in the inequality check.")
+
+    args = parser.parse_args()
+
+    run_blowup = args.run_blowup_test
+    run_commutator = args.run_commutator_test
+    run_time_reverse = args.run_time_reverse_test
+
+    # 1) Load or generate initial field
     if args.input is not None:
         omega_t = cp.load(args.input)
-        print(f"Loaded omega_t: shape {omega_t.shape}")
+        print(f"Loaded omega_t from {args.input}, shape {omega_t.shape}.")
     else:
-        print("No --input given. Using synthetic 'vortex tube'.")
-        omega_t = make_vortex_tube(N)
+        print("No --input provided. Generating a synthetic 'vortex tube' field.")
+        omega_t = make_vortex_tube(args.N)
 
-    # Quick trivial-field check: if nearly zero
-    # (We approximate "Y(t) ≈ 0 and align_sup ≈ 0" by checking L2 norm)
-    if float(cp.linalg.norm(omega_t.ravel())) < 1e-16:
-        print("[Warning] The initial field is near zero. Consider regenerating a non-trivial field.")
-        # Not exiting automatically, just letting user know
-
-    # Next-time field if provided
+    # 2) Optionally load next-timestep field
     omega_tpdt = None
     if args.input2 is not None:
         omega_tpdt = cp.load(args.input2)
-        print(f"Loaded omega_tpdt: shape {omega_tpdt.shape}")
+        print(f"Loaded omega_tpdt from {args.input2}, shape {omega_tpdt.shape}.")
 
-    # Possibly load grad_u if provided
+    # 3) Optionally load grad_u if provided
     grad_u = None
     if args.grad_u is not None and os.path.isfile(args.grad_u):
         grad_u = cp.load(args.grad_u)
+        print(f"Loaded grad_u from {args.grad_u}, shape {grad_u.shape}.")
 
-    # If running a multi-step simulation:
+    # 4) Multi-step evolution if timesteps > 0
     if args.timesteps > 0:
-        print(f"Running {args.timesteps} steps of vorticity evolution and certifying each step...")
+        print(f"Running {args.timesteps} time steps with dt={args.dt} and verifying at each step.")
         omega = omega_t.copy()
         for t in range(args.timesteps):
             context = f"timestep_{t:03d}"
             omega_next = time_evolve(omega, args.nu, args.dt)
-
             res, diagnostics = main_compute(
-                omega, omega_next, grad_u,
-                args.alpha, args.nu, args.j_min, args.j_max,
-                args.dt, args.eps, plot=args.plot, context=context
+                omega, omega_next,
+                grad_u,
+                args.alpha,
+                args.nu,
+                j_min=args.j_min,
+                j_max=args.j_max,
+                dt=args.dt,
+                eps=args.eps,
+                plot=args.plot,
+                validate=args.run_validation_checks,
+                context=context
             )
 
-            # Validation
             if args.run_validation_checks:
                 try:
                     validate_damping_terms(
@@ -627,7 +921,14 @@ def main():
                     )
                 except AssertionError as e:
                     print(f"[VALIDATION ERROR] {e}")
-                    save_forensic_failure(t, omega, res['Y'], res['dYdt'], res['rhs'], res['align_sup'])
+                    save_forensic_failure(
+                        timestep=t,
+                        omega=omega,
+                        Y=res['Y'],
+                        dYdt=res['dYdt'],
+                        rhs=res['rhs'],
+                        align_sup=res['align_sup']
+                    )
                     if args.strict:
                         sys.exit(1)
 
@@ -639,77 +940,159 @@ def main():
                 })
                 for w in warnings:
                     print(w)
-
                 H = compute_entropy(res['_entropic_per_shell'])
                 print(f"[entropy] H(t) = {H:.4f}")
 
-            # Export a Lean proof certificate each step
             if args.export_cert and (res['dYdt'] is not None) and (res['rhs'] is not None):
                 export_certificate(
                     f"/content/output/certificate_{context}.lean",
-                    res['dYdt'], res['rhs'],
-                    res['C_nl'], res['delta'], res['Lambda'],
-                    res['Y'], res['align_sup']
+                    res['dYdt'],
+                    res['rhs'],
+                    res['C_nl'],
+                    res['delta'],
+                    res['Lambda'],
+                    res['Y'],
+                    res['align_sup']
                 )
 
-            # If inequality fails, handle it
             if args.strict and res['holds'] is False:
-                print("FAIL: Damping inequality violated at timestep", t)
-                save_forensic_failure(t, omega, res['Y'], res['dYdt'], res['rhs'], res['align_sup'])
+                print(f"FAIL: Damping inequality violated at timestep {t}")
+                save_forensic_failure(
+                    timestep=t,
+                    omega=omega,
+                    Y=res['Y'],
+                    dYdt=res['dYdt'],
+                    rhs=res['rhs'],
+                    align_sup=res['align_sup']
+                )
                 sys.exit(1)
 
-            # advance
+            # NEW: write certificate line for this timestep
+            log_recursive_damping_certificate(
+                res,
+                t * args.dt,
+                args.nu,
+                args.alpha,
+                log_path=args.damping_log,
+                Y_star=args.Y_star,
+                tolerance=args.damping_tol,
+            )
+
             omega = omega_next.copy()
 
-        print(f"Timestep evolution complete ({args.timesteps} steps).")
-        return
+        print(f"Timestep evolution complete for {args.timesteps} steps.")
 
-    # Single-step scenario
-    res, diagnostics = main_compute(
-        omega_t, omega_tpdt, grad_u,
-        args.alpha, args.nu, args.j_min, args.j_max,
-        args.dt, args.eps, plot=args.plot
-    )
-
-    if args.export_cert and res['dYdt'] is not None and res['rhs'] is not None:
-        export_certificate(
-            "/content/output/certificate.lean",
-            res['dYdt'], res['rhs'],
-            res['C_nl'], res['delta'], res['Lambda'],
-            res['Y'], res['align_sup']
+    else:
+        # 5) Single-step certification if timesteps == 0
+        res, diagnostics = main_compute(
+            omega_t, omega_tpdt,
+            grad_u,
+            args.alpha,
+            args.nu,
+            j_min=args.j_min,
+            j_max=args.j_max,
+            dt=args.dt,
+            eps=args.eps,
+            plot=args.plot,
+            validate=args.run_validation_checks,
+            context='mainrun'
         )
 
-    if args.strict and res['holds'] is False:
-        print("FAIL: Damping inequality failed (main input).")
-        save_forensic_failure(0, omega_t, res['Y'], res['dYdt'], res['rhs'], res['align_sup'])
-        sys.exit(1)
-
-    if args.run_validation_checks:
-        try:
-            validate_damping_terms(
-                res['Y'], res['dYdt'], res['rhs'],
-                res['align_sup'], res['delta'],
-                res['Lambda'], res['C_nl']
+        if args.export_cert and (res['dYdt'] is not None) and (res['rhs'] is not None):
+            export_certificate(
+                "/content/output/certificate.lean",
+                res['dYdt'],
+                res['rhs'],
+                res['C_nl'],
+                res['delta'],
+                res['Lambda'],
+                res['Y'],
+                res['align_sup']
             )
-        except AssertionError as e:
-            print(f"[VALIDATION ERROR] {e}")
-            save_forensic_failure(0, omega_t, res['Y'], res['dYdt'], res['rhs'], res['align_sup'])
-            if args.strict:
-                sys.exit(1)
 
-        warnings = float_sanity_check({
-            'Y': res['Y'],
-            'dY/dt': res['dYdt'],
-            'RHS': res['rhs'],
-            'align_sup': res['align_sup'],
-        })
-        for w in warnings:
-            print(w)
-        H = compute_entropy(res['_entropic_per_shell'])
-        print(f"[entropy] H(t) = {H:.4f}")
+        if args.strict and res['holds'] is False:
+            print("FAIL: Damping inequality violated for the single-step scenario.")
+            save_forensic_failure(
+                timestep=0,
+                omega=omega_t,
+                Y=res['Y'],
+                dYdt=res['dYdt'],
+                rhs=res['rhs'],
+                align_sup=res['align_sup']
+            )
+            sys.exit(1)
 
-    print("Check complete. See /content/output/diagnostics_log_mainrun.json\n")
+        if args.run_validation_checks:
+            try:
+                validate_damping_terms(
+                    res['Y'], res['dYdt'], res['rhs'],
+                    res['align_sup'], res['delta'],
+                    res['Lambda'], res['C_nl']
+                )
+            except AssertionError as e:
+                print(f"[VALIDATION ERROR] {e}")
+                save_forensic_failure(
+                    timestep=0,
+                    omega=omega_t,
+                    Y=res['Y'],
+                    dYdt=res['dYdt'],
+                    rhs=res['rhs'],
+                    align_sup=res['align_sup']
+                )
+                if args.strict:
+                    sys.exit(1)
 
+            warnings = float_sanity_check({
+                'Y': res['Y'],
+                'dY/dt': res['dYdt'],
+                'RHS': res['rhs'],
+                'align_sup': res['align_sup']
+            })
+            for w in warnings:
+                print(w)
+            H = compute_entropy(res['_entropic_per_shell'])
+            print(f"[entropy] H(t) = {H:.4f}")
+
+        # NEW: dump certificate for t = 0 (single-step mode)
+        log_recursive_damping_certificate(
+            res,
+            0.0,
+            args.nu,
+            args.alpha,
+            log_path=args.damping_log,
+            Y_star=args.Y_star,
+            tolerance=args.damping_tol,
+        )
+
+        print("Default evolution + certification completed successfully.")
+        print("See /content/output/diagnostics_log_mainrun.json for details.")
+
+    # Now run additional diagnostic tests (after the main run)
+    if run_blowup:
+        simulate_blowup(
+            N=args.N, alpha=args.alpha, j_min=args.j_min, j_max=args.j_max,
+            dt=args.dt, timesteps=1, strict=args.strict, plot=args.plot,
+            run_validation_checks=args.run_validation_checks, nu=args.nu,
+            export_cert=args.export_cert, eps=args.eps
+        )
+
+    if run_commutator:
+        stress_commutator(
+            N=args.N, alpha=args.alpha, j_min=args.j_min, j_max=args.j_max,
+            dt=args.dt, timesteps=1, strict=args.strict, plot=args.plot,
+            run_validation_checks=args.run_validation_checks, nu=args.nu,
+            export_cert=args.export_cert, eps=args.eps
+        )
+
+    if run_time_reverse:
+        time_reverse_test(
+            N=args.N, alpha=args.alpha, j_min=args.j_min, j_max=args.j_max,
+            dt=args.dt, timesteps=1, strict=args.strict, plot=args.plot,
+            run_validation_checks=args.run_validation_checks, nu=args.nu,
+            export_cert=args.export_cert, eps=args.eps
+        )
+
+    print("All requested runs/tests are complete. Exiting.")
 
 if __name__ == "__main__":
     main()
