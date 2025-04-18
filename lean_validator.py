@@ -1,3 +1,4 @@
+%%writefile lean_validator.py
 #!/usr/bin/env python3
 
 import os
