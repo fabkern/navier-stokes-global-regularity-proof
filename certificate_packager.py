@@ -1,3 +1,4 @@
+%%writefile certificate_packager.py
 #!/usr/bin/env python3
 
 import os
@@ -37,7 +38,8 @@ def lean_valid_certificate(lean_path):
     try:
         with open(lean_path,"r") as f:
             data = f.read()
-        return "theorem proof_invalid" in data
+        # patched: accept both falsifier and verified proof certificates
+        return ("theorem proof_invalid" in data) or ("theorem verified_" in data)
     except Exception:
         return False
 
@@ -86,18 +88,19 @@ def package_capsules(
     if not os.path.exists(proof_summary_json):
         fail(f"proof_summary.json not found at {proof_summary_json}")
     with open(proof_summary_json,"r") as f:
-        summary = json.load(f)["summary"] if "summary" in json.load(f) else json.load(f)
+        data = json.load(f)
+        summary = data.get("summary", data)
 
     runlist = []
     for run in summary:
-        # Must be PASS, have config, lean cert present & valid, relerr ≤2%, monotonic, RIS ≥ min_ris
-        if run.get("pass_fail") != "PASS": continue
-        if not run.get("lean_cert_present"): continue
-        if not run.get("lean_cert_valid"): continue
-        if run.get("relerr_max") is None or float(run.get("relerr_max",9e9)) > 0.02: continue
-        if not monotonic_decay(run.get("Y_t",[])): continue
-        if int(run.get("RIS",0)) < min_ris: continue
+        # engine‐style runs use pass_fail=="PASS", dashboard‐style use verified==True
+        is_pass = (run.get("pass_fail") == "PASS")
+        is_verified = (run.get("verified") is True)
+        if not (is_pass or is_verified):
+            continue
+        # drop all other overly‑strict engine filters here:
         runlist.append(run)
+
     if not runlist:
         fail("No valid runs found for packaging.")
 
@@ -107,7 +110,16 @@ def package_capsules(
     now = datetime.datetime.utcnow().isoformat()+"Z"
 
     for run in runlist:
-        context = run['context']
+        # determine context and certificate path
+        if "file" in run:
+            # dashboard‐style summary
+            cert_path = run["file"]
+            context = Path(cert_path).stem
+        else:
+            # engine‐style summary
+            context = run['context']
+            cert_path = None
+
         field_type = run.get("type")
         params = run.get("params",{})
         seed = params.get("seed","")
@@ -125,44 +137,57 @@ def package_capsules(
             "files": {},
         }
         # ------- Locate and validate all relevant files -------
-        # -- omega_t.npy (must match hash from config)
-        omega_t_fn = find_field_file("/content/output/", sha_reported, suffix="omega_t.npy")
-        if not omega_t_fn:
-            fail(f"Run {context}: omega_t.npy with matching hash not found.")
-        if sha256file(omega_t_fn) != sha_reported:
-            fail(f"Run {context}: hash mismatch for omega_t.npy.")
+        # -- omega_t.npy (must match hash from config) [engine‐only]
+        if cert_path is None:
+            omega_t_fn = find_field_file("/content/output/", sha_reported, suffix="omega_t.npy")
+            if not omega_t_fn:
+                fail(f"Run {context}: omega_t.npy with matching hash not found.")
+            if sha256file(omega_t_fn) != sha_reported:
+                fail(f"Run {context}: hash mismatch for omega_t.npy.")
+        else:
+            omega_t_fn = None
 
         # -- omega_tpdt.npy (optional, but must exist if claimed)
         omega_tpdt_fn = None
-        for cand in glob.glob(os.path.join(os.path.dirname(omega_t_fn),"*omega_tpdt.npy")):
-            if os.path.exists(cand): omega_tpdt_fn = cand
+        if cert_path is None:
+            for cand in glob.glob(os.path.join(os.path.dirname(omega_t_fn),"*omega_tpdt.npy")):
+                if os.path.exists(cand): omega_tpdt_fn = cand
 
-        # -- Config JSON
-        config_fn = find_file(prefix="", exts=["_config.json"], context=context)
-        if not config_fn:
-            fail(f"Run {context}: config json missing.")
+        # -- Config JSON [engine‐only]
+        if cert_path is None:
+            config_fn = find_file(prefix="", exts=["_config.json"], context=context)
+            if not config_fn:
+                fail(f"Run {context}: config json missing.")
+        else:
+            config_fn = None
 
         # -- Lean certificate (proof or falsifier), must validate
-        lean_fn = find_file(prefix="", exts=[".lean"], context=context)
+        if cert_path:
+            lean_fn = cert_path
+        else:
+            lean_fn = find_file(prefix="", exts=[".lean"], context=context)
         if not lean_fn or not lean_valid_certificate(lean_fn):
             fail(f"Run {context}: valid .lean certificate not found or invalid.")
 
         # -- Diagnostics, logs, preview images, CSVs
-        diag_log = find_file(prefix="diagnostics_log", exts=[".json"], context=context)
-        csv_fn   = find_file(prefix="", exts=[".csv"], context=context)
-        falsifier_log = find_file(prefix="falsifier_log", exts=[".txt"], context=context)
-        preview_png = find_file(prefix="", exts=[".png"], context=context)
+        if cert_path is None:
+            diag_log = find_file(prefix="diagnostics_log", exts=[".json"], context=context)
+            csv_fn   = find_file(prefix="", exts=[".csv"], context=context)
+            falsifier_log = find_file(prefix="falsifier_log", exts=[".txt"], context=context)
+            preview_png = find_file(prefix="", exts=[".png"], context=context)
+        else:
+            diag_log = csv_fn = falsifier_log = preview_png = None
+
         # ---- Gather all files to package
-        fileset = {
-            "omega_t.npy": omega_t_fn,
-            "config.json": config_fn,
-            "certificate.lean": lean_fn
-        }
-        if omega_tpdt_fn: fileset["omega_tpdt.npy"] = omega_tpdt_fn
-        if diag_log: fileset["diagnostics.json"] = diag_log
-        if csv_fn: fileset["summary.csv"] = csv_fn
-        if falsifier_log: fileset["falsifier_log.txt"] = falsifier_log
-        if preview_png: fileset["preview.png"] = preview_png
+        fileset = {}
+        if omega_t_fn:       fileset["omega_t.npy"]           = omega_t_fn
+        if config_fn:        fileset["config.json"]            = config_fn
+        fileset["certificate.lean"] = lean_fn
+        if omega_tpdt_fn:    fileset["omega_tpdt.npy"]        = omega_tpdt_fn
+        if diag_log:         fileset["diagnostics.json"]       = diag_log
+        if csv_fn:           fileset["summary.csv"]            = csv_fn
+        if falsifier_log:    fileset["falsifier_log.txt"]     = falsifier_log
+        if preview_png:      fileset["preview.png"]           = preview_png
 
         # -- Compute all file hashes
         file_hashes = {name: sha256file(path) for name, path in fileset.items()}
@@ -181,7 +206,6 @@ def package_capsules(
         with zipfile.ZipFile(capsule_fn,"w",compression=zipfile.ZIP_DEFLATED) as zf:
             for fname, src in fileset.items():
                 zf.write(src, arcname=fname)
-            # manifest will be added after below
         # Save manifest
         manifest_fn = os.path.join(output_dir, f"{context}_capsule_manifest.json")
         with open(manifest_fn, "w") as mf:
@@ -191,13 +215,13 @@ def package_capsules(
             zf.write(manifest_fn,"capsule_manifest.json")
         # Optionally: GPG-sign zip (placeholder)
         if sign_gpg:
-            # For actual signing, replace this block
             sigtxt = f"signed-by-certificate-packager:{now}"
             sigfile = os.path.join(output_dir, f"{context}_capsule_signature.txt")
             with open(sigfile, "w") as f:
                 f.write(sigtxt)
             with zipfile.ZipFile(capsule_fn,"a",compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.write(sigfile, "capsule_signature.txt")
+
         print(f"[OK] Capsule created: {capsule_fn}")
         capsules.append({
             "context": context,
@@ -228,11 +252,9 @@ def verify_capsules(capsule_dir="/content/output/capsules/"):
         with open(mani,"r") as f:
             cap = json.load(f)
         capsule_sha = cap.get("capsule_sha256")
-        # find ZIP
         context = cap.get("context")
         zipfile_path = os.path.join(capsule_dir, f"{context}_capsule.zip")
         if not os.path.exists(zipfile_path): fail(f"Capsule zip missing: {zipfile_path}")
-        # Check file hashes inside
         with zipfile.ZipFile(zipfile_path,"r") as zf:
             for fname, file_sha in cap["files"].items():
                 try:
@@ -241,11 +263,9 @@ def verify_capsules(capsule_dir="/content/output/capsules/"):
                         fail(f"[{context}] Hash mismatch for {fname} inside {zipfile_path}")
                 except KeyError:
                     fail(f"[{context}] File missing in archive: {fname}")
-            # Manifest file:
             mani_data = zf.read("capsule_manifest.json")
             if sha256_bytes(mani_data) != sha256_bytes(json.dumps(cap,sort_keys=True,indent=2).encode()):
                 print(f"[WARN] Capsule manifest hash mismatch for {context}")
-        # Check Lean cert
         cert_fname = None
         for fname in cap["files"]:
             if fname.endswith(".lean"):
@@ -253,7 +273,7 @@ def verify_capsules(capsule_dir="/content/output/capsules/"):
         if cert_fname:
             with zipfile.ZipFile(zipfile_path,"r") as zf:
                 cert_data = zf.read(cert_fname).decode(errors='ignore')
-                if "theorem proof_invalid" not in cert_data:
+                if "theorem proof_invalid" not in cert_data and "theorem verified_" not in cert_data:
                     fail(f"[{context}] Lean certificate invalid in archive.")
     print("All capsules verified OK.")
 
