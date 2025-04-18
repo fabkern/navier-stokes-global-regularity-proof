@@ -1,3 +1,4 @@
+%%writefile proof_falsifier_engine.py
 import os
 import sys
 import shutil
@@ -209,15 +210,16 @@ def main():
             proc2 = subprocess.run(ode_args, capture_output=True, cwd="/content/")
             ode_failed = proc2.returncode != 0
         # --- Handle any failures ---
-        failed = False
+        failed = proof_failed or ode_failed
+        # pass_fail tag for packaging:
+        run_info["pass_fail"] = "FAIL" if failed else "PASS"
+
         cx_this_run_dir = ""
-        if proof_failed or ode_failed:
-            failed = True
+        if failed:
             fail_reason = []
             cxdir = os.path.join(cx_dir, context_full)
             safe_makedirs(cxdir)
             cx_this_run_dir = cxdir
-            safe_makedirs(cxdir)
             shutil.copy('/content/omega_t.npy', os.path.join(cxdir, f"{context_full}_omega_t.npy"))
             shutil.copy('/content/omega_tpdt.npy', os.path.join(cxdir, f"{context_full}_omega_tpdt.npy"))
             copy_if_exists(proof_log, os.path.join(cxdir, f"{context_full}_diagnostics_log.json"))
@@ -247,7 +249,8 @@ def main():
                 if '_entropic_per_shell' in diag:
                     ent_arr = [float(s.get('norm',0)) for s in diag['_entropic_per_shell']]
                     summary["entropy_curves"].append({"context":context, "entropy": ent_arr})
-        except Exception: pass
+        except Exception:
+            pass
         # Save run details
         run_info.update({
             "proof_failed": proof_failed,
@@ -262,6 +265,12 @@ def main():
     # Final bundle zip
     if summary["counterexample_paths"]:
         bundle_counterexamples(summary["counterexample_paths"])
+
+    # --- NEW: dump out a proof_summary.json for packaging:
+    proof_summary_fn = os.path.join(output_dir, "proof_summary.json")
+    with open(proof_summary_fn, "w") as f:
+        json.dump({"summary": summary["run_details"]}, f, indent=2)
+    print(f"Wrote summary to {proof_summary_fn}")
 
     # Print report
     print("------ Adversarial Falsification Test Report ------")
