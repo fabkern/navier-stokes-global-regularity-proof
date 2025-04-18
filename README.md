@@ -96,17 +96,21 @@ python3 lean_validator.py --dir /content/output/counterexamples/ --strict --chec
 
 ## Output Artifacts
 
-| File/Folder                      | Purpose |
-|----------------------------------|---------|
-| `omega_t.npy`, `omega_tpdt.npy` | Vorticity fields (pre/post timestep) |
-| `certificate_timestep_*.lean`   | Per-step Lean theorem statement |
-| `diagnostics_log_*.json`        | All per-shell norms, alignments, constants |
-| `proof_plot_Y.png`              | Inequality LHS vs RHS visualized |
-| `entropy_histogram.png`         | Entropy metric evolution |
-| `/counterexamples/`             | All failed falsification attempts |
-| `certificate_bundle.zip`        | All above packed for audit |
-| `proof_summary.csv/md/json`     | Dashboard-level summary |
-| `README.md`                     | This file |
+| File/Folder                                 | Purpose |
+|---------------------------------------------|---------|
+| `omega_t.npy`, `omega_tpdt.npy`             | Vorticity fields (pre/post timestep) |
+| `diagnostics_log_*.json`                    | All per-shell norms, alignments, constants |
+| `certificate_timestep_*.lean`               | Lean theorem export per timestep |
+| `certificate_bundle.zip`                    | Zip archive of all Lean files and configs |
+| `/capsules/`                                 | Individually zipped per-step proof capsules |
+| `/counterexamples/`                         | All failed falsification attempts with diagnostics |
+| `proof_plot_Y.png`                          | Recursive norm \(Y(t)\) LHS vs RHS visualization |
+| `entropy_histogram.png`                     | Entropy decay tracking per timestep |
+| `proof_summary.json` / `.csv` / `.md`       | Full proof dashboard metadata, scores, and Lean paths |
+| `lean_validation_summary.csv`               | RIS and compile integrity scores |
+| `lean_validation_report.md`                 | Human-readable audit of Lean cert results |
+| `lean_validator_metadata.json`              | Metadata and Lean version info |
+| `README.md`                                 | This file |
 
 ---
 
@@ -135,7 +139,7 @@ Paper: https://osf.io/32exc/
 
 ---
 
-## Pending
+## Pending Named Validation Results
 
 The following named validation outputs will be added once finalized:
 
@@ -151,9 +155,13 @@ The following named validation outputs will be added once finalized:
 ### Lean Certificate Compilation
 - **Lean Certificate Validation Score**  
   *Pending re-run with environment fix*  
-  → _“All **100** timesteps compiled and validated in Lean. **No failed certificates**. **90%** scored **RIS > 4** on reproducibility/integrity metric.”_  
+  → “All 100 timesteps compiled to Lean. Validation re-run underway after environment re-stabilization. Preliminary output: no failed certificates; 90% scored RIS > 4.”
 
 Once the Lean environment path is re-stabilized and RIS summary is regenerated, these claims will be officially embedded in the main proof readme and OSF archive.
+
+---
+
+Built to be broken. If this inequality fails, let it fail loud and early.
 
 ---
 ## Authorship & License
