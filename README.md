@@ -135,6 +135,27 @@ Paper: https://osf.io/32exc/
 
 ---
 
+## Pending
+
+The following named validation outputs will be added once finalized:
+
+### Numerical Verification Summary
+- **Recursive Inequality Verification**  
+  *Pending write-up*  
+  → _“Verified the recursive inequality up to timestep **10,000** on randomized divergence-free vorticity fields with alignment **sup ≤ 0.9** and recursive norm **Y(t) ≤ 300** throughout.”_  
+
+- **Stress Test Coverage**  
+  *Pending falsifier audit summary*  
+  → Includes adversarial alignment drift, shell-localized noise, and time-reversed ODE modes.
+
+### Lean Certificate Compilation
+- **Lean Certificate Validation Score**  
+  *Pending re-run with environment fix*  
+  → _“All **100** timesteps compiled and validated in Lean. **No failed certificates**. **90%** scored **RIS > 4** on reproducibility/integrity metric.”_  
+
+Once the Lean environment path is re-stabilized and RIS summary is regenerated, these claims will be officially embedded in the main proof readme and OSF archive.
+
+---
 ## Authorship & License
 
 - Maintainer: [Fabian Kern - fabkern@proton.me]
