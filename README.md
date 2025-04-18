@@ -129,6 +129,12 @@ python3 lean_validator.py --dir /content/output/counterexamples/ --strict --chec
 
 ---
 
+## Paper
+
+Paper: https://osf.io/32exc/
+
+---
+
 ## Authorship & License
 
 - Maintainer: [Fabian Kern - fabkern@proton.me]
